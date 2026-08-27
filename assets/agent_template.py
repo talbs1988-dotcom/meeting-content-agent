@@ -26,6 +26,7 @@ CONFIG = json.loads((HERE / "config.json").read_text(encoding="utf-8"))
 # אליהם גם מהנייד.
 CONTENT_ROOT = Path(CONFIG["content_folder"])
 FOLDERS = {
+    "POV": CONTENT_ROOT / "POV",
     "ריל": CONTENT_ROOT / "רילס",
     "קרוסלה": CONTENT_ROOT / "קרוסלה",
     "פוסט": CONTENT_ROOT / "פוסט",
@@ -54,6 +55,9 @@ PIECES_PER_MEETING = CONFIG.get("pieces_per_meeting", 3)
 READABLE = {".txt", ".md", ".json", ".vtt", ".srt", ".docx"}
 
 FORMATS = {
+    # POV הוא פורמט בפני עצמו, לא תת-סוג של פוסט. יש לו חוקי קול
+    # משלו (references/pov.md) והוא הפורמט שהכי מהר בונה חיבור.
+    "POV": ["POV1", "POV2", "POV3"],
     "פוסט": [f"P{i}" for i in range(1, 11)],
     "ריל": [f"R{i}" for i in range(1, 9)],
     "קרוסלה": [f"C{i}" for i in range(1, 8)],
@@ -266,6 +270,44 @@ def has_leaked_names(text):
     return None if ans.startswith("נקי") else ans[:60]
 
 
+def upload_to_drive(local_path, kind, drive_folder_name):
+    """מעלה את הקובץ לגוגל דרייב דרך קלוד, בלי אפליקציית דרייב על המחשב.
+
+    למה לא תיקייה מסונכרנת: זה תלוי באפליקציה שרצה. אצל בעל עסק אמיתי
+    האפליקציה נמחקה (תפסה מקום בדיסק), והתוצאה הייתה שחודשיים של תוכן
+    ישבו על המחשב ולא הגיעו לענן — **בלי שום שגיאה.** הסוכן דיווח
+    "נשמר", והוא באמת נשמר. הוא פשוט לא הגיע ליעד.
+
+    ככה זה לא תלוי בכלום חוץ מהחיבור שכבר קיים בקלוד קוד.
+    """
+    if not CONFIG.get("upload_to_drive", True):
+        return True
+    content = local_path.read_text(encoding="utf-8")
+    prompt = (
+        f"העלה לגוגל דרייב שלי קובץ בשם '{local_path.stem}' "
+        f"לתיקייה '{drive_folder_name}' (אם אין תיקייה כזו, צור אותה "
+        f"בתוך '{CONTENT_ROOT.name}').\n\n"
+        f"התוכן:\n\n{content}"
+    )
+    try:
+        r = subprocess.run(
+            [CLAUDE, "-p", prompt, "--allowedTools",
+             "mcp__claude_ai_Google_Drive__create_file,mcp__claude_ai_Google_Drive__search_files"],
+            capture_output=True, text=True, timeout=300,
+        )
+    except Exception as e:
+        log(f"  ⚠️ ההעלאה לדרייב קרסה: {e.__class__.__name__}")
+        return False
+
+    ans = (r.stdout or "").lower()
+    if r.returncode != 0 or any(s in ans for s in
+                                ["לא הצלחתי", "אין לי גישה", "צריך לאשר", "failed", "permission"]):
+        log(f"  ⚠️ ההעלאה לדרייב נכשלה. הקובץ נשמר מקומית: {local_path.name}")
+        return False
+    log("  ☁️ הועלה לדרייב")
+    return True
+
+
 def save_docx(md_text, out_path, title=None):
     """שומר גם גרסת Word, עם יישור לימין.
 
@@ -383,7 +425,7 @@ def pick_audience_layer(kind, used_today, layers):
     if not layers:
         return None
     # לכל סוג תוכן סדר עדיפויות אחר, כדי שיום אחד יכסה כמה פלחים
-    offset = {"ריל": 0, "קרוסלה": 1, "פוסט": 2, "סטורי": 3}.get(kind, 0)
+    offset = {"POV": 0, "ריל": 1, "קרוסלה": 2, "פוסט": 3, "סטורי": 4}.get(kind, 0)
     order = layers[offset % len(layers):] + layers[: offset % len(layers)]
     for l in order:
         if l not in used_today:
@@ -487,7 +529,7 @@ def run(test_mode=False):
     if not analyses:
         raise RuntimeError("אף קובץ לא עובד בהצלחה")
 
-    ALL_KINDS = ["ריל", "קרוסלה", "פוסט", "סטורי"]
+    ALL_KINDS = ["POV", "ריל", "קרוסלה", "פוסט", "סטורי"]
     layers = extract_layers(voice)
     if layers:
         log(f"פלחי קהל מקובץ הקול: {len(layers)}")
@@ -531,6 +573,7 @@ def run(test_mode=False):
         p = folder / f"{today}_{code}_{m_idx + 1}.md"
         p.write_text(content, encoding="utf-8")
         save_docx(content, p.with_suffix(".docx"), title=f"{kind} · {today}")
+        upload_to_drive(p, kind, folder.name)
         created.append(p)
         if layer:
             used_layers.append(layer)
@@ -587,6 +630,12 @@ def build_analysis_prompt(transcript, voice):
 
 
 def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None):
+    format_ref = (
+        f"{SKILL_REFS}/pov.md — הפורמט הזה הוא POV. קרא את הקובץ במלואו,\n"
+        "   יש לו חוקי קול משלו ונקודת כשל שקל ליפול בה"
+        if kind == "POV"
+        else f"{SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק"
+    )
     layer_line = (
         f"\n⚠️ הפיסה הזו מכוונת לפלח קהל מסוים: **{layer}**\n"
         "כתוב אליו, לא לכולם. פיסה שמנסה לדבר לכל הקהל לא מדברת לאף אחד.\n"
@@ -595,9 +644,8 @@ def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None):
     return f"""אתה כותב {kind} עבור בעל עסק, בקול שלו.
 
 חובה לקרוא לפני שאתה כותב:
-1. {SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק
-2. {SKILL_REFS}/pov.md — אם זה POV
-3. {SKILL_REFS}/privacy.md — הכללים על שמות
+{format_ref}
+{SKILL_REFS}/privacy.md — הכללים על שמות
 
 ⚠️ סדר עדיפויות כשיש התנגשות: הקול > הסודיות > מבנה הפורמט.
 
