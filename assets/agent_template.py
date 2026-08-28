@@ -10,6 +10,7 @@
     python3 agent.py --test    קובץ אחד, פלט אחד, בלי לעדכן מצב
 """
 import json
+import shutil
 import re
 import subprocess
 import sys
@@ -34,6 +35,31 @@ FOLDERS = {
 }
 DAILY_SUMMARY = CONTENT_ROOT / "_סיכום_יומי"
 LEARNED = CONTENT_ROOT / "_מה_למדנו"  # מצטבר, לא נמחק — זה הנכס
+
+# הארכיון: התמלול המלא נשמר, לא נמחק. גם אם יוחלף כלי התמלול מחר,
+# ההיסטוריה נשארת ואפשר לחזור ולהוציא ממנה עוד.
+ARCHIVE = Path(CONFIG.get("archive_folder") or (CONTENT_ROOT.parent / "פגישות לקוחות"))
+
+MONTHS = ["ינואר","פברואר","מרץ","אפריל","מאי","יוני","יולי","אוגוסט","ספטמבר","אוקטובר","נובמבר","דצמבר"]
+
+
+def month_dir(base, when=None):
+    """base/2026/אוגוסט — תיקיית חודש נוצרת רק כשיש בה תוכן"""
+    d = when or datetime.now()
+    return base / str(d.year) / MONTHS[d.month - 1]
+
+
+# ── הגשר לגיליון. אופציונלי: בלעדיו הסוכן עובד בדיוק אותו דבר ──────
+PIPELINE = None
+DRIVE_LINKS = {}   # נתיב מקומי -> לינק בדרייב
+if CONFIG.get("pipeline_url"):
+    try:
+        import sys as _sys
+        _sys.path.insert(0, str(HERE))
+        from pipeline import Pipeline as _P
+        PIPELINE = _P(CONFIG["pipeline_url"])
+    except Exception as _e:
+        PIPELINE = None
 
 # המנוע מקומי בכוונה: state.json נכתב תוך כדי ריצה, וקובץ שהסנכרון
 # תופס באמצע כתיבה הוא קובץ פגום.
@@ -283,10 +309,24 @@ def upload_to_drive(local_path, kind, drive_folder_name):
     if not CONFIG.get("upload_to_drive", True):
         return True
     content = local_path.read_text(encoding="utf-8")
+    root = CONFIG.get("drive_folder_name") or CONTENT_ROOT.name
+    root_id = CONFIG.get("drive_folder_id", "").strip()
+
+    # ⚠️ המסלול המלא חייב להיות מפורש, ועדיף מזהה תיקייה.
+    # בבדיקה אמיתית הפרומפט אמר רק "העלה לתיקייה 'רילס'", וקלוד מצא
+    # תיקייה בשם הזה במקום אחר בדרייב והעלה לשם — לתוך התוכן האמיתי
+    # של מישהו אחר. שם תיקייה לבדו הוא לא כתובת.
+    where = (
+        f"לתיקייה עם המזהה {root_id} (זו תיקיית '{root}'), במסלול '{drive_folder_name}'"
+        if root_id
+        else f"למסלול '{drive_folder_name}' שנמצא **בתוך** התיקייה '{root}'"
+    )
     prompt = (
-        f"העלה לגוגל דרייב שלי קובץ בשם '{local_path.stem}' "
-        f"לתיקייה '{drive_folder_name}' (אם אין תיקייה כזו, צור אותה "
-        f"בתוך '{CONTENT_ROOT.name}').\n\n"
+        f"העלה לגוגל דרייב קובץ בשם '{local_path.stem}' {where}.\n\n"
+        f"⚠️ אם המסלול '{drive_folder_name}' לא קיים בתוך '{root}' — צור את כל התיקיות בדרך.\n"
+        f"⚠️ בסוף החזר את הקישור לקובץ שנוצר, בשורה נפרדת.\n"
+        f"⚠️ אל תעלה לתיקייה בשם דומה שנמצאת במקום אחר בדרייב. "
+        f"רק בתוך '{root}'.\n\n"
         f"התוכן:\n\n{content}"
     )
     try:
@@ -304,7 +344,13 @@ def upload_to_drive(local_path, kind, drive_folder_name):
                                 ["לא הצלחתי", "אין לי גישה", "צריך לאשר", "failed", "permission"]):
         log(f"  ⚠️ ההעלאה לדרייב נכשלה. הקובץ נשמר מקומית: {local_path.name}")
         return False
-    log("  ☁️ הועלה לדרייב")
+    m = re.search(r"https://(?:docs|drive)\.google\.com/\S+", r.stdout or "")
+    if m:
+        DRIVE_LINKS[str(local_path)] = m.group(0).rstrip(").,\"'")
+        log("  ☁️ הועלה לדרייב")
+    else:
+        # הועלה, אבל בלי קישור. הגיליון יקבל את הנתיב המקומי
+        log("  ☁️ הועלה לדרייב (בלי קישור בתשובה)")
     return True
 
 
@@ -467,7 +513,7 @@ def run(test_mode=False):
     log("=" * 60)
     log("ריצה התחילה" + (" (מצב בדיקה)" if test_mode else ""))
 
-    for d in list(FOLDERS.values()) + [DAILY_SUMMARY, LEARNED]:
+    for d in [DAILY_SUMMARY, LEARNED, ARCHIVE]:
         safe(d.mkdir, parents=True, exist_ok=True)
 
     if not VOICE_FILE.exists():
@@ -523,7 +569,17 @@ def run(test_mode=False):
         analyses.append(result)
         if not test_mode:
             state["processed_files"].append(f.name)
-            safe(f.unlink)  # המקור נמחק — ראה privacy.md
+            # התמלול המלא עובר לארכיון ולא נמחק. זה מה שמאפשר לחזור
+            # לשיחה ישנה ולהוציא ממנה עוד, גם אחרי החלפת כלי תמלול.
+            dest_dir = month_dir(ARCHIVE, datetime.fromtimestamp(f.stat().st_mtime))
+            safe(dest_dir.mkdir, parents=True, exist_ok=True)
+            dest = dest_dir / f.name
+            if dest.exists():
+                dest = dest_dir / f"{f.stem}__{abs(hash(f.name)) % 10000}{f.suffix}"
+            if safe(shutil.move, str(f), str(dest)) is None:
+                log("  ⚠️ ההעברה לארכיון נכשלה — הקובץ נשאר במקומו")
+            else:
+                log(f"  📦 לארכיון: {dest.parent.name}/{dest.name}")
         log(f"  ✅ נשמר ({len(result):,} תווים)")
 
     if not analyses:
@@ -536,6 +592,7 @@ def run(test_mode=False):
     used_layers = []
     today = f"{datetime.now():%Y-%m-%d}"
     created = []
+    hooks = []      # מה שיירשם בגיליון בסוף הריצה
 
     # כל פגישה מקבלת את מלוא תשומת הלב שלה
     jobs = []
@@ -568,12 +625,12 @@ def run(test_mode=False):
                 log(f"  ❌ {kind} עדיין מכיל שם — מדלג")
                 continue
 
-        folder = FOLDERS[kind]
+        folder = month_dir(FOLDERS[kind])
         safe(folder.mkdir, parents=True, exist_ok=True)
         p = folder / f"{today}_{code}_{m_idx + 1}.md"
         p.write_text(content, encoding="utf-8")
         save_docx(content, p.with_suffix(".docx"), title=f"{kind} · {today}")
-        upload_to_drive(p, kind, folder.name)
+        upload_to_drive(p, kind, f"{FOLDERS[kind].name}/{folder.parent.name}/{folder.name}")
         created.append(p)
         if layer:
             used_layers.append(layer)
@@ -581,7 +638,8 @@ def run(test_mode=False):
                 used_layers = []
         if not test_mode:
             state["format_history"][code] = today
-        log(f"  ✅ נשמר ב{folder.name}/ ({p.stat().st_size:,} בתים)")
+        hooks.append({"kind": kind, "path": p, "text": content})
+        log(f"  ✅ נשמר ב{FOLDERS[kind].name}/{folder.parent.name}/{folder.name}/")
 
     # סיכום יומי — מה נוצר היום, במקום אחד
     if created:
@@ -590,12 +648,62 @@ def run(test_mode=False):
         lines += [f"- {p.parent.name}/{p.name}" for p in created]
         (DAILY_SUMMARY / f"{today}.md").write_text("\n".join(lines), encoding="utf-8")
 
+    # ── שורה בגיליון לכל פיסת תוכן ──────────────────────────────────
+    if hooks and PIPELINE:
+        try:
+            items = [{
+                "תאריך": today,
+                "סוג": h["kind"],
+                "הוק": first_line(h["text"]),
+                "לינק": drive_link(h["path"]),
+            } for h in hooks]
+            res = PIPELINE.add(items)
+            log(f"📋 {res.get('added', 0)} שורות נכנסו לגיליון ({res.get('tab', '')})")
+            if not test_mode:
+                state["pipeline_rows"] = state.get("pipeline_rows", 0) + res.get("added", 0)
+        except Exception as e:
+            # הגיליון נכשל, התוכן כבר שמור. לא מפילים ריצה בגלל זה
+            log(f"⚠️ הכתיבה לגיליון נכשלה: {e}")
+            log("   התוכן שמור בדרייב. אפשר לתקן את הגשר ולהריץ --sync")
+    elif hooks and not PIPELINE:
+        log("ℹ️ אין גשר לגיליון. התוכן נשמר בדרייב בלבד")
+
     if not test_mode:
         state["last_run"] = datetime.now().isoformat()
         save_state(state)
 
     log("=" * 60)
     log(f"סיום. נוצרו {len(created)} תכנים ב{CONTENT_ROOT.name}/")
+
+
+def first_line(text, limit=90):
+    """ההוק שנרשם בגיליון — המשפט שבאמת פותח, לא הכותרת הטכנית.
+
+    קבצי התוכן נפתחים בהערת פורמט ובכותרת פנימית ("קרוסלה C2 — ..."),
+    ואם לוקחים את השורה הראשונה מקבלים בגיליון שורה שלא אומרת כלום
+    לבעל העסק. לכן קודם מחפשים שדה מפורש, ורק אחר כך שורת תוכן.
+    """
+    LABELS = ("כותרת:", "הוק:", "פתיח:", "שקופית 1", "שורה 1")
+    for raw in text.splitlines():
+        line = raw.strip().strip("*_").strip()
+        for lab in LABELS:
+            if line.startswith(lab) or line.startswith("**" + lab):
+                val = line.split(lab, 1)[1].strip(" *:—-")
+                if len(val) >= 8:
+                    return val[:limit].rstrip(" ,.:;-")
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith(("<!--", "#", "---", "===", "|")):
+            continue
+        line = line.strip("*_").strip()
+        if len(line) >= 12:
+            return line[:limit].rstrip(" ,.:;-")
+    return text.strip()[:limit]
+
+
+def drive_link(path):
+    """לינק לקובץ, אם הועלה לדרייב. אחרת הנתיב המקומי"""
+    return DRIVE_LINKS.get(str(path), str(path))
 
 
 def build_analysis_prompt(transcript, voice):

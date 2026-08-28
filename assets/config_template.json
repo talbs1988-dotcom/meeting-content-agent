@@ -3,17 +3,26 @@
 
   "transcripts_folder": "<התיקייה שהתמלולים נוחתים בה>",
   "content_folder": "<תיקייה מקומית לתוכן. גיבוי, לא היעד>",
+  "archive_folder": "<תיקיית הארכיון לתמלולים המלאים. ריק = ליד תיקיית התוכן>",
   "upload_to_drive": true,
   "drive_folder_name": "<שם תיקיית התוכן בגוגל דרייב>",
+  "drive_folder_id": "",
   "voice_file": "<~/.claude/skills/<שם-סקיל-הקול>/SKILL.md — הסקיל שנבנה ב-my-voice, לא הטיוטה>",
   "email": "<כתובת המייל של בעל העסק>",
-  "drive_link": "<לינק לתיקיית התוכן בדרייב. אם אין, להשאיר ריק>",
+
+  "_הגיליון": "אופציונלי. בלעדיו הסוכן עובד בדיוק אותו דבר, רק בלי טבלה",
+  "sheet_url": "<הקישור לגיליון, לפתיחה מהמייל>",
+  "pipeline_url": "<כתובת ה-Web app מ-Apps Script. מתחילה ב-https://script.google.com/>",
 
   "skill_refs": "<הנתיב לתיקיית references של הסקיל>",
   "claude_path": "claude",
+  "mail_tool": "mcp__claude_ai_Gmail__send_message",
 
   "run_hour": 21,
   "heartbeat_hour": 7,
+  "weekly_day": 6,
+  "weekly_hour": 8,
+
   "lookback_days": 30,
   "pieces_per_meeting": 3
 }
