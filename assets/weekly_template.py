@@ -138,8 +138,85 @@ def send(subject, body):
     return True
 
 
+# ── הלמידה: תיקונים של בעל העסק חוזרים לקובץ הדוגמאות ──────────────
+#
+# האות היחיד שנלקח הוא שורה שבעל העסק **גם סימן וגם שכתב**.
+# שורה שאושרה בלי שינוי היא תוצר של הסוכן עצמו — החזרה שלה פנימה
+# מלמדת אותו מעצמו, והקול נסחף לאט בלי שאף אחד שם לב.
+
+def harvest_corrections():
+    """מחזיר (נוספו, אושרו_בלי_שינוי). לא מפיל את הריצה לעולם."""
+    cfg = CONFIG
+    if not cfg.get("pipeline_url"):
+        return 0, 0
+    try:
+        sys.path.insert(0, str(Path(__file__).resolve().parent))
+        from pipeline import Pipeline
+        rows = Pipeline(cfg["pipeline_url"]).approved()
+    except Exception as e:
+        print(f"⚠️ קריאת הגיליון נכשלה: {e}")
+        return 0, 0
+
+    st = state()
+    sent = st.get("hooks_sent", {})
+    harvested = set(st.get("harvested", []))
+
+    fresh, unchanged = [], 0
+    for r in rows:
+        link, hook = r.get("link", ""), (r.get("hook") or "").strip()
+        if not link or not hook or link in harvested:
+            continue
+        original = (sent.get(link) or "").strip()
+        if not original:
+            continue                      # לא אנחנו כתבנו את זה
+        if hook == original:
+            unchanged += 1
+            continue                      # אושר כמו שהוא — לא נכנס
+        fresh.append((r.get("type", ""), hook))
+        harvested.add(link)
+
+    if not fresh:
+        return 0, unchanged
+
+    ex = Path(cfg.get("examples_file") or
+              (Path(cfg["content_folder"]) / "דוגמאות-טובות.md"))
+    try:
+        if not ex.exists():
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            ex.write_text("# דוגמאות טובות\n\n"
+                          "> הצורה נלמדת מכאן. הקול תמיד מקובץ הקול.\n",
+                          encoding="utf-8")
+        today = datetime.now().strftime("%d.%m.%Y")
+        block = "".join(
+            f"\n---\n\n<!-- {kind} · שכתבת בעצמך · {today} -->\n{hook}\n"
+            for kind, hook in fresh)
+        with ex.open("a", encoding="utf-8") as fh:
+            fh.write(block)
+    except Exception as e:
+        print(f"⚠️ הכתיבה לקובץ הדוגמאות נכשלה: {e}")
+        return 0, unchanged
+
+    try:
+        st["harvested"] = sorted(harvested)
+        STATE.write_text(json.dumps(st, ensure_ascii=False, indent=2),
+                         encoding="utf-8")
+    except Exception as e:
+        print(f"⚠️ עדכון ה-state נכשל: {e}")   # הדוגמאות כבר נשמרו
+
+    return len(fresh), unchanged
+
+
 def main():
+    added, unchanged = harvest_corrections()
+    if added:
+        print(f"📎 {added} שורות שכתבת בעצמך נוספו לדוגמאות")
+    if unchanged:
+        print(f"   ({unchanged} אושרו בלי שינוי — לא נכנסות, כדי שלא ילמד מעצמו)")
+
     body = build_body()
+    if added:
+        body += (f"\n\n---\n📎 למדתי מ-{added} שורות ששכתבת השבוע. "
+                 "התוכן הבא יהיה קרוב יותר אליך.")
     pieces, _ = week_stats()
     subject = (f"{pieces} תכנים מחכים לך" if pieces else "הסוכן לא כתב השבוע")
     print(body)

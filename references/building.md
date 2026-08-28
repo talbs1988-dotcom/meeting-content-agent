@@ -79,6 +79,7 @@
   "transcripts_folder": "/Users/x/Library/CloudStorage/GoogleDrive-.../Fireflies",
   "workspace": "/Users/x/Library/CloudStorage/GoogleDrive-.../סוכן-התוכן",
   "voice_file": "/Users/x/.claude/skills/הקול-של-רונית/SKILL.md",
+  "examples_file": "/Users/x/.../התוכן שלי/דוגמאות-טובות.md",
   "email": "owner@example.com",
   "drive_link": "https://drive.google.com/drive/folders/...",
 

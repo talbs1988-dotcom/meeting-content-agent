@@ -7,6 +7,7 @@
   "upload_to_drive": true,
   "drive_folder_name": "<שם תיקיית התוכן בגוגל דרייב>",
   "drive_folder_id": "",
+  "examples_file": "<דוגמאות-טובות.md. ריק = בתיקיית התוכן. בלעדיו הסוכן עובד, רק פחות טוב>",
   "voice_file": "<~/.claude/skills/<שם-סקיל-הקול>/SKILL.md — הסקיל שנבנה ב-my-voice, לא הטיוטה>",
   "email": "<כתובת המייל של בעל העסק>",
 

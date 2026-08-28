@@ -68,6 +68,10 @@ STATE_FILE = HERE / "state.json"
 
 TRANSCRIPTS = Path(CONFIG["transcripts_folder"])
 VOICE_FILE = Path(CONFIG["voice_file"])
+
+# דוגמאות טובות. כללים מלמדים מה אסור, דוגמאות מלמדות צורה.
+# אופציונלי לגמרי — בלעדיו הסוכן עובד בדיוק אותו דבר, רק פחות טוב.
+EXAMPLES_FILE = Path(CONFIG.get("examples_file") or (CONTENT_ROOT / "דוגמאות-טובות.md"))
 SKILL_REFS = Path(CONFIG["skill_refs"])  # תיקיית references של הסקיל
 
 CLAUDE = CONFIG.get("claude_path", "claude")
@@ -129,7 +133,8 @@ def safe(fn, *a, **kw):
 
 
 def load_state():
-    base = {"last_run": None, "processed_files": [], "format_history": {}}
+    base = {"last_run": None, "processed_files": [], "format_history": {},
+            "hooks_sent": {}}
     if STATE_FILE.exists():
         try:
             s = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -520,6 +525,14 @@ def run(test_mode=False):
         raise RuntimeError(f"קובץ הקול לא נמצא: {VOICE_FILE}")
     voice = VOICE_FILE.read_text(encoding="utf-8")
 
+    examples = ""
+    if EXAMPLES_FILE.exists():
+        examples = EXAMPLES_FILE.read_text(encoding="utf-8").strip()
+        n = examples.count("---")
+        log(f"📎 דוגמאות טובות: {EXAMPLES_FILE.name} ({n} דוגמאות)")
+    else:
+        log("ℹ️ אין קובץ דוגמאות. הכתיבה תסתמך על הכללים בלבד")
+
     state = load_state()
     new_files = find_new(state)
     if test_mode:
@@ -608,7 +621,7 @@ def run(test_mode=False):
         layer = pick_audience_layer(kind, used_layers, layers)
         log(f"כותב {kind} ({code}) מפגישה {m_idx + 1}" + (f" · {layer[:30]}" if layer else ""))
         prompt = build_content_prompt(
-            kind, code, analyses[m_idx], voice, LEARNED, layer
+            kind, code, analyses[m_idx], voice, LEARNED, layer, examples
         )
         content = ask_claude(prompt, f"content_{kind}", min_len=300)
         if not content:
@@ -658,6 +671,13 @@ def run(test_mode=False):
                 "לינק": drive_link(h["path"]),
             } for h in hooks]
             res = PIPELINE.add(items)
+            # ההוק המקורי נשמר לפי הלינק (מפתח ייחודי לכל פיסה).
+            # הריצה השבועית משווה מולו כדי לזהות מה בעל העסק שכתב.
+            if not test_mode:
+                sent = state.setdefault("hooks_sent", {})
+                for it in items:
+                    if it["לינק"]:
+                        sent[it["לינק"]] = it["הוק"]
             log(f"📋 {res.get('added', 0)} שורות נכנסו לגיליון ({res.get('tab', '')})")
             if not test_mode:
                 state["pipeline_rows"] = state.get("pipeline_rows", 0) + res.get("added", 0)
@@ -762,12 +782,25 @@ def build_analysis_prompt(transcript, voice):
 """
 
 
-def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None):
+def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None, examples=""):
     format_ref = (
         f"{SKILL_REFS}/pov.md — הפורמט הזה הוא POV. קרא את הקובץ במלואו,\n"
         "   יש לו חוקי קול משלו ונקודת כשל שקל ליפול בה"
         if kind == "POV"
         else f"{SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק"
+    )
+    examples_block = (
+        "\n" + "=" * 60 + "\n"
+        "דוגמאות שבעל העסק בחר בעצמו — כאלה שהוא חושב שהן מעולות:\n\n"
+        f"{examples}\n"
+        + "=" * 60 + "\n\n"
+        "⚠️⚠️ **מה ללמוד מהן ומה לא — זה קריטי:**\n\n"
+        "✅ **קח מהן צורה בלבד:** אורך השורה · הקצב · איפה נשבר המשפט ·\n"
+        "   כמה מוקדם מגיע המספר · איך נסגר הקפשן\n\n"
+        "⛔ **אל תיקח מהן מילים, סלנג, סיפורים, מספרים או זהות.**\n"
+        "   כל אלה באים **רק** מקובץ הקול ומהניתוח של הפגישה.\n\n"
+        "אם דוגמה כתובה בסגנון של מישהו אחר — הצורה שלה מותרת, המילים שלה אסורות.\n"
+        if examples else ""
     )
     layer_line = (
         f"\n⚠️ הפיסה הזו מכוונת לפלח קהל מסוים: **{layer}**\n"
@@ -798,7 +831,7 @@ def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None):
 
 הקול של בעל העסק:
 {voice}
-{layer_line}
+{examples_block}{layer_line}
 
 מה שנלמד על הקהל עד היום: {learned_dir}
 
