@@ -10,7 +10,8 @@
 | בדיקה | איך | אם נכשל |
 |-------|-----|---------|
 | תיקיית התמלולים קיימת ויש בה קבצים | `ls` על הנתיב | לשאול אם הכלי באמת מייצא לשם |
-| קובץ הקול קיים | `ls` | לעצור ולהפנות לשלב בניית הקול |
+| קובץ הקול קיים | `ls` | לעצור ולהפנות לסקיל `my-voice` |
+| **הקול מצביע על סקיל, לא על טיוטה** | הנתיב מסתיים ב-`skills/<שם>/SKILL.md` | ⚠️ `voice-profile.md` היא טיוטה שמתה. קריאה ממנה = קול מיושן, בלי שגיאה |
 | **"למי אני מוכר" הוא רשימה** | לקרוא את הקובץ | להפוך לרשימה יחד איתו |
 | **"מה אסור לי" קיים** | לקרוא את הקובץ | לשאול אותו ולהוסיף |
 | תיקיית הדרייב נמצאה | `~/Library/CloudStorage/GoogleDrive-*/` | לשאול איפה הוא שומר דברים |
@@ -74,7 +75,7 @@
 {
   "transcripts_folder": "/Users/x/Library/CloudStorage/GoogleDrive-.../Fireflies",
   "workspace": "/Users/x/Library/CloudStorage/GoogleDrive-.../סוכן-התוכן",
-  "voice_file": "/Users/x/הקול-שלי.md",
+  "voice_file": "/Users/x/.claude/skills/הקול-של-רונית/SKILL.md",
   "email": "owner@example.com",
   "drive_link": "https://drive.google.com/drive/folders/...",
 
