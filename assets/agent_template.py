@@ -72,6 +72,10 @@ VOICE_FILE = Path(CONFIG["voice_file"])
 # דוגמאות טובות. כללים מלמדים מה אסור, דוגמאות מלמדות צורה.
 # אופציונלי לגמרי — בלעדיו הסוכן עובד בדיוק אותו דבר, רק פחות טוב.
 EXAMPLES_FILE = Path(CONFIG.get("examples_file") or (CONTENT_ROOT / "דוגמאות-טובות.md"))
+
+# השאלות שחוזרות. נבנה מחדש בכל ריצה מכל הניתוחים — בלי state,
+# כדי שטעות אחת לא תישאר לתמיד.
+QUESTIONS_FILE = CONTENT_ROOT / "השאלות-שחוזרות.md"
 SKILL_REFS = Path(CONFIG["skill_refs"])  # תיקיית references של הסקיל
 
 CLAUDE = CONFIG.get("claude_path", "claude")
@@ -134,7 +138,7 @@ def safe(fn, *a, **kw):
 
 def load_state():
     base = {"last_run": None, "processed_files": [], "format_history": {},
-            "hooks_sent": {}}
+            "hooks_sent": {}, "produced": [], "produced_week": {}}
     if STATE_FILE.exists():
         try:
             s = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -616,12 +620,26 @@ def run(test_mode=False):
             break
     log(f"{len(analyses)} פגישות → {len(jobs)} פיסות תוכן")
 
+    # ── השאלות שחוזרות ─────────────────────────────────────────────
+    # רץ אחרי הניתוחים ולפני הכתיבה, כדי שהכתיבה תצא משאלה אמיתית
+    # ולא מזווית שהומצאה. כישלון כאן לא מפיל ריצה — נופלים למסרים
+    # שבקובץ הקול, בדיוק כמו בחודש הראשון.
+    questions_text = ""
+    try:
+        from questions import build as build_questions
+        log("מחפש שאלות שחוזרות")
+        n, qpath = build_questions(LEARNED, QUESTIONS_FILE, CLAUDE, log)
+        if qpath and qpath.exists():
+            questions_text = qpath.read_text(encoding="utf-8")
+    except Exception as e:
+        log(f"  ⚠️ חיפוש השאלות נכשל, ממשיך בלעדיו: {e.__class__.__name__}")
+
     for kind, m_idx in jobs:
         code = pick_format(kind, state["format_history"])
         layer = pick_audience_layer(kind, used_layers, layers)
         log(f"כותב {kind} ({code}) מפגישה {m_idx + 1}" + (f" · {layer[:30]}" if layer else ""))
         prompt = build_content_prompt(
-            kind, code, analyses[m_idx], voice, LEARNED, layer, examples
+            kind, code, analyses[m_idx], voice, questions_text, layer, examples
         )
         content = ask_claude(prompt, f"content_{kind}", min_len=300)
         if not content:
@@ -687,6 +705,19 @@ def run(test_mode=False):
             log("   התוכן שמור בדרייב. אפשר לתקן את הגשר ולהריץ --sync")
     elif hooks and not PIPELINE:
         log("ℹ️ אין גשר לגיליון. התוכן נשמר בדרייב בלבד")
+
+    # ── שער האישור ─────────────────────────────────────────────────
+    # מה שבעל העסק סימן בגיליון עובר להפקה. רק מה שסימן.
+    # ברירת המחדל היא תמיד אי-הוצאה: לא סימן = לא נוצר = לא עלה.
+    if PIPELINE and not test_mode:
+        try:
+            import gate
+            state.setdefault("weekly_cap",
+                             CONFIG.get("weekly_production_cap", gate.DEFAULT_CAP))
+            log("שער האישור — בודק מה סומן")
+            gate.run(PIPELINE, state, CONFIG.get("producer_cmd"), log)
+        except Exception as e:
+            log(f"⚠️ שער האישור נכשל, התוכן שמור: {e.__class__.__name__}")
 
     if not test_mode:
         state["last_run"] = datetime.now().isoformat()
@@ -782,12 +813,29 @@ def build_analysis_prompt(transcript, voice):
 """
 
 
-def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None, examples=""):
+def build_content_prompt(kind, code, analysis, voice, questions="", layer=None, examples=""):
     format_ref = (
         f"{SKILL_REFS}/pov.md — הפורמט הזה הוא POV. קרא את הקובץ במלואו,\n"
         "   יש לו חוקי קול משלו ונקודת כשל שקל ליפול בה"
         if kind == "POV"
         else f"{SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק"
+    )
+    questions_block = (
+        "=" * 60 + "\n"
+        "⭐ השאלות שלקוחות שואלים אותו שוב ושוב:\n\n"
+        f"{questions}\n"
+        + "=" * 60 + "\n\n"
+        "⚠️⚠️ **זו נקודת הפתיחה של הפיסה הזו:**\n\n"
+        "**ההוק הוא שאלה חוזרת — בניסוח של הלקוח, לא בניסוח שלך.**\n"
+        "שאלה שנשאלה חמש פעמים כבר הוכיחה שהיא מטרידה אנשים אמיתיים.\n"
+        "היא לא צריכה שיפור, היא צריכה שיישמעו אותה.\n\n"
+        "**הגוף הוא התשובה של בעל העסק מהניתוח.** מה שהוא ענה בפועל,\n"
+        "בפגישה, במילים שלו. לא הסבר כללי על הנושא.\n\n"
+        "בחר את השאלה שהכי מתאימה לניתוח שלפניך. אם אף שאלה לא מתחברת\n"
+        "לחומר של הפגישה הזו — עדיף לצאת מהחומר, ולא למתוח שאלה בכוח.\n"
+        if questions.strip() else
+        "**עדיין אין מספיק פגישות כדי לדעת מה חוזר.**\n"
+        "צא מ-`## המסרים שלי` שבקובץ הקול — מה שהוא הכי רוצה שיבינו.\n"
     )
     examples_block = (
         "\n" + "=" * 60 + "\n"
@@ -833,7 +881,7 @@ def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None, e
 {voice}
 {examples_block}{layer_line}
 
-מה שנלמד על הקהל עד היום: {learned_dir}
+{questions_block}
 
 ---
 הניתוח של הפגישה:
