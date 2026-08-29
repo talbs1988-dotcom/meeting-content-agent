@@ -32,16 +32,18 @@ def _week(when=None):
     return f"{y}-W{w:02d}"
 
 
-def pending(pipeline, state, log=print):
-    """מה אושר, עוד לא הופק, ובתוך התקרה. מחזיר רשימת שורות."""
-    try:
-        rows = pipeline.approved()
-    except Exception as e:
-        log(f"  קריאת הגיליון נכשלה: {e.__class__.__name__}")
-        return []
+def pending(source, state, log=print):
+    """מה אושר, עוד לא הופק, ובתוך התקרה.
+
+    `source` הוא callable שמחזיר את השורות המאושרות.
+    ⚠️ **כישלון קריאה מתפוצץ ולא מחזיר רשימה ריקה** — אחרת ניתוק
+    מהמחבר נראה בדיוק כמו "בעל העסק לא אישר כלום", ואף אחד לא יודע
+    שהמסמך בכלל לא נקרא.
+    """
+    rows = source()   # נזרק במתכוון אם הקריאה נכשלה
 
     done = set(state.get("produced", []))
-    fresh = [r for r in rows if r.get("link") and r["link"] not in done]
+    fresh = [r for r in rows if r.get("key") and r["key"] not in done]
     if not fresh:
         return []
 
@@ -67,9 +69,9 @@ def produce(row, producer_cmd, log=print):
     if not producer_cmd:
         return None  # אין יוצר מוגדר. זה לא כישלון, זה מצב
 
-    cmd = [c.replace("{hook}", row.get("hook", ""))
-            .replace("{link}", row.get("link", ""))
-            .replace("{type}", row.get("type", ""))
+    cmd = [c.replace("{hook}", (row.get("text") or row.get("hook") or "").split("\n")[0])
+            .replace("{text}", row.get("text", ""))
+            .replace("{type}", row.get("kind") or row.get("type", ""))
            for c in producer_cmd]
     try:
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=TIMEOUT)
@@ -93,12 +95,16 @@ def produce(row, producer_cmd, log=print):
     return True
 
 
-def run(pipeline, state, producer_cmd=None, log=print):
-    """מחזיר (הופקו, נכשלו). לא זורק לעולם."""
-    if pipeline is None:
+def run(source, state, producer_cmd=None, log=print):
+    """מחזיר (הופקו, נכשלו).
+
+    כישלון קריאה **כן** מתפוצץ החוצה. הקורא צריך לדעת את ההבדל בין
+    "לא אישרת כלום" ל"לא הצלחתי לקרוא".
+    """
+    if source is None:
         return 0, 0
 
-    rows = pending(pipeline, state, log)
+    rows = pending(source, state, log)
     if not rows:
         return 0, 0
 
@@ -109,12 +115,12 @@ def run(pipeline, state, producer_cmd=None, log=print):
 
     ok = bad = 0
     for r in rows:
-        hook = (r.get("hook") or "")[:50]
+        hook = (r.get("text") or r.get("hook") or "")[:50]
         log(f"  מפיק: {hook}…")
         res = produce(r, producer_cmd, log)
         if res:
             ok += 1
-            state.setdefault("produced", []).append(r["link"])
+            state.setdefault("produced", []).append(r["key"])
             wk = state.setdefault("produced_week", {})
             wk[_week()] = wk.get(_week(), 0) + 1
             log("    ✅ הופק")

@@ -208,7 +208,18 @@ https://drive.google.com/drive/folders/1OkMbUfyHm0fUKJMhQmxm4lukJ_Koj3cv
 
 ## 7. התזמון
 
-**מק** — שני קבצי plist ב־`~/Library/LaunchAgents/`:
+**אל תכתוב plist ביד.** יש `assets/schedule.py` שמתקין, מאמת מול
+המערכת, ויודע מק, לינוקס וחלונות:
+
+```bash
+python3 schedule.py <תיקיית-המנוע>            # התקנה + אימות
+python3 schedule.py <תיקיית-המנוע> --status   # מה באמת רץ
+```
+
+⚠️ **הוא מכניס PATH לתוך ה-plist.** ל-launchd אין את ה-PATH של הטרמינל,
+ובלעדיו `claude` לא נמצא — והריצה נכשלת בכל לילה בלי שאף אחד יודע.
+
+**מק** — שלושה קבצי plist ב־`~/Library/LaunchAgents/`:
 
 ```
 com.<שם>.content-agent.plist       כל לילה 21:00   — קורא, מנתח, כותב
