@@ -35,6 +35,7 @@ FOLDERS = {
 }
 DAILY_SUMMARY = CONTENT_ROOT / "_סיכום_יומי"
 LEARNED = CONTENT_ROOT / "_מה_למדנו"  # מצטבר, לא נמחק — זה הנכס
+IDEAS = CONTENT_ROOT / "בנק רעיונות"  # הקובץ היחיד שבעל העסק פותח
 MIRROR = CONTENT_ROOT / "_מראה"  # ניתוח השיחה עצמה. לבעל העסק, לא לתוכן.
 
 # הארכיון: התמלול המלא נשמר, לא נמחק. גם אם יוחלף כלי התמלול מחר,
@@ -591,7 +592,7 @@ def run(test_mode=False):
     log("=" * 60)
     log("ריצה התחילה" + (" (מצב בדיקה)" if test_mode else ""))
 
-    for d in [DAILY_SUMMARY, LEARNED, ARCHIVE, MIRROR]:
+    for d in [DAILY_SUMMARY, LEARNED, ARCHIVE, MIRROR, IDEAS]:
         safe(d.mkdir, parents=True, exist_ok=True)
 
     if not VOICE_FILE.exists():
@@ -658,7 +659,9 @@ def run(test_mode=False):
             mirror = ask_claude(mp, "mirror", min_len=1500)
             if mirror:
                 safe(MIRROR.mkdir, parents=True, exist_ok=True)
-                safe((MIRROR / f"{stamp}__{f.stem[:40]}.md").write_text,
+                mdir = month_dir(MIRROR, datetime.strptime(stamp, "%Y-%m-%d"))
+                safe(mdir.mkdir, parents=True, exist_ok=True)
+                safe((mdir / f"{stamp}__{f.stem[:40]}.md").write_text,
                      mirror, encoding="utf-8")
                 log("  🪞 ניתוח מראה נשמר")
             else:
@@ -667,18 +670,39 @@ def run(test_mode=False):
         else:
             mirror = ""
 
-        out = LEARNED / f"{stamp}__{f.stem[:40]}__{abs(hash(f.name)) % 100000}.md"
+        ldir = month_dir(LEARNED, datetime.strptime(stamp, "%Y-%m-%d"))
+        ldir.mkdir(parents=True, exist_ok=True)
+        out = ldir / f"{stamp}__{f.stem[:40]}__{abs(hash(f.name)) % 100000}.md"
         out.write_text(result, encoding="utf-8")
         # שתי הרשימות גדלות **יחד ובשורות צמודות**, בכוונה.
         # אם הן יוצאות מסנכרון, המראה של פגישה אחת מתחברת לניתוח של
         # אחרת — והתוכן ייצא מדויק בטון ושגוי בעובדות. בלי שגיאה.
         analyses.append(result)
         mirrors.append(mirror)
+
+        # ── בנק הרעיונות ───────────────────────────────────────────
+        # הקובץ היחיד שבעל העסק פותח. הרעיונות ראשונים בו, כי זה מה
+        # שהוא בא בשבילו — לא ניתוח.
+        try:
+            import idea_bank
+            bank = idea_bank.build(result, mirror, f.stem, stamp)
+            bdir = month_dir(IDEAS, datetime.strptime(stamp, "%Y-%m-%d"))
+            bdir.mkdir(parents=True, exist_ok=True)
+            bp = bdir / f"{stamp}__{f.stem[:40]}.md"
+            bp.write_text(bank, encoding="utf-8")
+            save_docx(bank, bp.with_suffix(".docx"), "בנק רעיונות")
+            safe(upload_to_drive, bp, None,
+                 f"בנק רעיונות/{bdir.parent.name}/{bdir.name}")
+            log(f"  💡 בנק רעיונות → {bp.name}")
+        except Exception as e:
+            log(f"  ⚠️ בנק הרעיונות נכשל: {e.__class__.__name__}")
         if not test_mode:
             state["processed_files"].append(f.name)
             # התמלול המלא עובר לארכיון ולא נמחק. זה מה שמאפשר לחזור
             # לשיחה ישנה ולהוציא ממנה עוד, גם אחרי החלפת כלי תמלול.
-            dest_dir = month_dir(ARCHIVE, datetime.fromtimestamp(f.stat().st_mtime))
+            # ⚠️ לפי תאריך הפגישה, לא לפי מתי שהקובץ הועתק. אחרת
+            # ארכיון של שנה שלמה נוחת כולו בחודש שבו הריצו אותו.
+            dest_dir = month_dir(ARCHIVE, datetime.strptime(stamp, "%Y-%m-%d"))
             safe(dest_dir.mkdir, parents=True, exist_ok=True)
             dest = dest_dir / f.name
             if dest.exists():
@@ -931,12 +955,41 @@ def build_mirror_prompt(transcript):
 """
 
 
+def load_format(kind, code):
+    """מחזיר את **הטקסט** של מפרט הפורמט, לא נתיב אליו.
+
+    ⚠️ **זה היה הבאג הכי יקר בסוכן הזה.** הפרומפט אמר למודל
+    "קרא את pov.md במלואו" ונתן לו נתיב. המודל לא תמיד קרא, ולכן
+    שלוש הסדרות, שלושת המטענים, חמשת העקרונות ומילת התגובה —
+    **אף פעם לא הגיעו אליו.** הוא כתב מהידע הכללי שלו עם קובץ קול
+    מוצמד, והפלט יצא גנרי בלי שאף אחד הבין למה.
+
+    מפרט שנמצא בפרומפט מגיע. מפרט שנמצא בנתיב — אולי.
+    """
+    try:
+        if kind == "POV":
+            return (SKILL_REFS / "pov.md").read_text(encoding="utf-8")
+        text = (SKILL_REFS / "formats.md").read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    # החלק של הפורמט: מ-"## <קוד> —" עד ה-## הבא
+    m = re.search(rf"^## {re.escape(code)} —.*?(?=^## |\Z)", text,
+                  re.M | re.S)
+    if m:
+        return m.group(0).strip()
+    return ""
+
+
 def build_content_prompt(kind, code, analysis, voice, questions="", layer=None, examples="", mirror=""):
+    spec = load_format(kind, code)
     format_ref = (
-        f"{SKILL_REFS}/pov.md — הפורמט הזה הוא POV. קרא את הקובץ במלואו,\n"
-        "   יש לו חוקי קול משלו ונקודת כשל שקל ליפול בה"
-        if kind == "POV"
-        else f"{SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק"
+        "\n" + "=" * 60 + "\n"
+        f"📐 המפרט של {code} — **זה מה שאתה כותב לפיו. לא ידע כללי.**\n\n"
+        f"{spec}\n"
+        + "=" * 60 + "\n"
+        if spec else
+        f"⚠️ מפרט הפורמט {code} לא נטען. אל תמציא מבנה — "
+        "כתוב פשוט ונקי, וציין בסוף שהמפרט חסר."
     )
     mirror_block = (
         "\n" + "=" * 60 + "\n"
