@@ -35,6 +35,8 @@ FOLDERS = {
 }
 DAILY_SUMMARY = CONTENT_ROOT / "_סיכום_יומי"
 LEARNED = CONTENT_ROOT / "_מה_למדנו"  # מצטבר, לא נמחק — זה הנכס
+IDEAS = CONTENT_ROOT / "בנק רעיונות"  # הקובץ היחיד שבעל העסק פותח
+MIRROR = CONTENT_ROOT / "_מראה"  # ניתוח השיחה עצמה. לבעל העסק, לא לתוכן.
 
 # הארכיון: התמלול המלא נשמר, לא נמחק. גם אם יוחלף כלי התמלול מחר,
 # ההיסטוריה נשארת ואפשר לחזור ולהוציא ממנה עוד.
@@ -72,6 +74,10 @@ VOICE_FILE = Path(CONFIG["voice_file"])
 # דוגמאות טובות. כללים מלמדים מה אסור, דוגמאות מלמדות צורה.
 # אופציונלי לגמרי — בלעדיו הסוכן עובד בדיוק אותו דבר, רק פחות טוב.
 EXAMPLES_FILE = Path(CONFIG.get("examples_file") or (CONTENT_ROOT / "דוגמאות-טובות.md"))
+
+# השאלות שחוזרות. נבנה מחדש בכל ריצה מכל הניתוחים — בלי state,
+# כדי שטעות אחת לא תישאר לתמיד.
+QUESTIONS_FILE = CONTENT_ROOT / "השאלות-שחוזרות.md"
 SKILL_REFS = Path(CONFIG["skill_refs"])  # תיקיית references של הסקיל
 
 CLAUDE = CONFIG.get("claude_path", "claude")
@@ -134,7 +140,7 @@ def safe(fn, *a, **kw):
 
 def load_state():
     base = {"last_run": None, "processed_files": [], "format_history": {},
-            "hooks_sent": {}}
+            "hooks_sent": {}, "produced": [], "produced_week": {}}
     if STATE_FILE.exists():
         try:
             s = json.loads(STATE_FILE.read_text(encoding="utf-8"))
@@ -265,6 +271,55 @@ def anonymize(text, known_names=None):
             text = re.sub(rf"(?<![\w֐-׿]){re.escape(w)}(?![\w֐-׿])", "[הושמט]", text)
 
     return text
+
+
+# תקרת התמלול. **לא 40,000.**
+# בבדיקה על 173 תמלולים אמיתיים: החציון 106,779 תווים, המקסימום 230,822,
+# ו-159 מתוך 173 מעל 40K. כלומר בתקרה הישנה הסוכן ניתח שליש מכל פגישה,
+# **וסוף הפגישה — שם נסגרות ההחלטות — מעולם לא נקרא.**
+TRANSCRIPT_LIMIT = 180000
+
+
+def fit_transcript(text, limit=TRANSCRIPT_LIMIT):
+    """מחזיר (טקסט, הערה). כשחייבים לקצץ — לוקחים משלושת החלקים.
+
+    חיתוך מההתחלה בלבד הוא הגרוע ביותר: הפתיחה היא חימום, האמצע הוא
+    התוכן, והסוף הוא ההחלטות והסיכום. אלה בדיוק החלקים שהתוכן צריך.
+    """
+    n = len(text)
+    if n <= limit:
+        return text, ""
+    third = limit // 3
+    head = text[:third]
+    mid_start = (n - third) // 2
+    mid = text[mid_start:mid_start + third]
+    tail = text[-third:]
+    note = (f"⚠️ הפגישה ארוכה ({n:,} תווים). כאן ההתחלה, האמצע והסוף — "
+            "לא ברצף. אל תניח שהחסר לא היה.")
+    return (f"{head}\n\n[...קטע הושמט...]\n\n{mid}"
+            f"\n\n[...קטע הושמט...]\n\n{tail}"), note
+
+
+def meeting_date(f):
+    """התאריך של הפגישה, לא של הקריאה.
+
+    למה זה חשוב: השאלות החוזרות נספרות לפי תאריך. אם כל הקבצים
+    מתויגים ביום שבו הסוכן קרא אותם, הם נראים לו כפגישה אחת —
+    **ואז שום שאלה לא יכולה לחזור.** זה נתפס בהרצה אמיתית על
+    שלוש פגישות: "17 שאלות מ-1 פגישות · 0 שאלות חוזרות".
+
+    זה קורה בכל הרצה ראשונה על ארכיון קיים, וזה בדיוק מה שתלמיד
+    עושה ביום הראשון.
+
+    כמעט כל כלי תמלול שם את התאריך בשם הקובץ. משתמשים בו כשהוא
+    שם, ונופלים ל-mtime רק כשאין.
+    """
+    m = re.search(r"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})", f.name)
+    if m:
+        y, mo, d = m.groups()
+        if "01" <= mo <= "12" and "01" <= d <= "31":
+            return f"{y}-{mo}-{d}"
+    return datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d")
 
 
 def has_leaked_names(text):
@@ -426,9 +481,28 @@ def read_transcript(path):
             return json.dumps(d, ensure_ascii=False), names
 
         if path.suffix == ".docx":
-            r = subprocess.run(["textutil", "-convert", "txt", "-stdout", str(path)],
-                               capture_output=True, text=True, timeout=60)
-            return r.stdout, names
+            # python-docx קודם: הוא עובד על כל מערכת הפעלה.
+            # textutil קיים רק במק — תלמיד על Windows היה מקבל
+            # מחרוזת ריקה, והקובץ היה מדולג כ"קצר מדי". בשקט.
+            try:
+                from docx import Document
+                doc = Document(str(path))
+                out = "\n".join(par.text for par in doc.paragraphs)
+                for tbl in doc.tables:
+                    for row in tbl.rows:
+                        out += "\n" + " | ".join(c.text for c in row.cells)
+                if out.strip():
+                    return out, names
+            except Exception:
+                pass
+            if shutil.which("textutil"):
+                r = subprocess.run(
+                    ["textutil", "-convert", "txt", "-stdout", str(path)],
+                    capture_output=True, text=True, timeout=60)
+                return r.stdout, names
+            log(f"  ⚠️ אי אפשר לקרוא {path.name} — "
+                "להתקין python-docx (pip install python-docx)")
+            return "", names
 
         if path.suffix in {".vtt", ".srt"}:
             raw = path.read_text(encoding="utf-8", errors="ignore")
@@ -518,7 +592,7 @@ def run(test_mode=False):
     log("=" * 60)
     log("ריצה התחילה" + (" (מצב בדיקה)" if test_mode else ""))
 
-    for d in [DAILY_SUMMARY, LEARNED, ARCHIVE]:
+    for d in [DAILY_SUMMARY, LEARNED, ARCHIVE, MIRROR, IDEAS]:
         safe(d.mkdir, parents=True, exist_ok=True)
 
     if not VOICE_FILE.exists():
@@ -546,7 +620,7 @@ def run(test_mode=False):
             f"# {datetime.now():%Y-%m-%d}\n\nלא היו פגישות חדשות", encoding="utf-8")
         return
 
-    analyses = []
+    analyses, mirrors = [], []
     for i, f in enumerate(new_files, 1):
         log(f"[{i}/{len(new_files)}] {f.name}")
         raw, known = read_transcript(f)
@@ -576,15 +650,59 @@ def run(test_mode=False):
                 log("  ❌ הניתוח עדיין מכיל שם — מדלג על הפגישה")
                 continue
 
-        stamp = datetime.fromtimestamp(f.stat().st_mtime).strftime("%Y-%m-%d")
-        out = LEARNED / f"{stamp}__{f.stem[:40]}__{abs(hash(f.name)) % 100000}.md"
+        # ── ניתוח המראה ────────────────────────────────────────────
+        # רץ אחרי הניתוח הרגיל, ולא במקומו. כישלון כאן לא מפיל כלום —
+        # התוכן כבר נשמר.
+        stamp = meeting_date(f)
+        mp = build_mirror_prompt(raw)
+        if mp:
+            mirror = ask_claude(mp, "mirror", min_len=1500)
+            if mirror:
+                safe(MIRROR.mkdir, parents=True, exist_ok=True)
+                mdir = month_dir(MIRROR, datetime.strptime(stamp, "%Y-%m-%d"))
+                safe(mdir.mkdir, parents=True, exist_ok=True)
+                safe((mdir / f"{stamp}__{f.stem[:40]}.md").write_text,
+                     mirror, encoding="utf-8")
+                log("  🪞 ניתוח מראה נשמר")
+            else:
+                log("  (ניתוח המראה לא הצליח — ממשיך)")
+                mirror = ""
+        else:
+            mirror = ""
+
+        ldir = month_dir(LEARNED, datetime.strptime(stamp, "%Y-%m-%d"))
+        ldir.mkdir(parents=True, exist_ok=True)
+        out = ldir / f"{stamp}__{f.stem[:40]}__{abs(hash(f.name)) % 100000}.md"
         out.write_text(result, encoding="utf-8")
+        # שתי הרשימות גדלות **יחד ובשורות צמודות**, בכוונה.
+        # אם הן יוצאות מסנכרון, המראה של פגישה אחת מתחברת לניתוח של
+        # אחרת — והתוכן ייצא מדויק בטון ושגוי בעובדות. בלי שגיאה.
         analyses.append(result)
+        mirrors.append(mirror)
+
+        # ── בנק הרעיונות ───────────────────────────────────────────
+        # הקובץ היחיד שבעל העסק פותח. הרעיונות ראשונים בו, כי זה מה
+        # שהוא בא בשבילו — לא ניתוח.
+        try:
+            import idea_bank
+            bank = idea_bank.build(result, mirror, f.stem, stamp)
+            bdir = month_dir(IDEAS, datetime.strptime(stamp, "%Y-%m-%d"))
+            bdir.mkdir(parents=True, exist_ok=True)
+            bp = bdir / f"{stamp}__{f.stem[:40]}.md"
+            bp.write_text(bank, encoding="utf-8")
+            save_docx(bank, bp.with_suffix(".docx"), "בנק רעיונות")
+            safe(upload_to_drive, bp, None,
+                 f"בנק רעיונות/{bdir.parent.name}/{bdir.name}")
+            log(f"  💡 בנק רעיונות → {bp.name}")
+        except Exception as e:
+            log(f"  ⚠️ בנק הרעיונות נכשל: {e.__class__.__name__}")
         if not test_mode:
             state["processed_files"].append(f.name)
             # התמלול המלא עובר לארכיון ולא נמחק. זה מה שמאפשר לחזור
             # לשיחה ישנה ולהוציא ממנה עוד, גם אחרי החלפת כלי תמלול.
-            dest_dir = month_dir(ARCHIVE, datetime.fromtimestamp(f.stat().st_mtime))
+            # ⚠️ לפי תאריך הפגישה, לא לפי מתי שהקובץ הועתק. אחרת
+            # ארכיון של שנה שלמה נוחת כולו בחודש שבו הריצו אותו.
+            dest_dir = month_dir(ARCHIVE, datetime.strptime(stamp, "%Y-%m-%d"))
             safe(dest_dir.mkdir, parents=True, exist_ok=True)
             dest = dest_dir / f.name
             if dest.exists():
@@ -614,14 +732,30 @@ def run(test_mode=False):
             jobs.append((ALL_KINDS[(m_idx + k) % len(ALL_KINDS)], m_idx))
         if test_mode:
             break
+    assert len(mirrors) == len(analyses), "המראות והניתוחים יצאו מסנכרון"
     log(f"{len(analyses)} פגישות → {len(jobs)} פיסות תוכן")
+
+    # ── השאלות שחוזרות ─────────────────────────────────────────────
+    # רץ אחרי הניתוחים ולפני הכתיבה, כדי שהכתיבה תצא משאלה אמיתית
+    # ולא מזווית שהומצאה. כישלון כאן לא מפיל ריצה — נופלים למסרים
+    # שבקובץ הקול, בדיוק כמו בחודש הראשון.
+    questions_text = ""
+    try:
+        from questions import build as build_questions
+        log("מחפש שאלות שחוזרות")
+        n, qpath = build_questions(LEARNED, QUESTIONS_FILE, CLAUDE, log)
+        if qpath and qpath.exists():
+            questions_text = qpath.read_text(encoding="utf-8")
+    except Exception as e:
+        log(f"  ⚠️ חיפוש השאלות נכשל, ממשיך בלעדיו: {e.__class__.__name__}")
 
     for kind, m_idx in jobs:
         code = pick_format(kind, state["format_history"])
         layer = pick_audience_layer(kind, used_layers, layers)
         log(f"כותב {kind} ({code}) מפגישה {m_idx + 1}" + (f" · {layer[:30]}" if layer else ""))
         prompt = build_content_prompt(
-            kind, code, analyses[m_idx], voice, LEARNED, layer, examples
+            kind, code, analyses[m_idx], voice, questions_text, layer,
+            examples, mirrors[m_idx] if m_idx < len(mirrors) else ""
         )
         content = ask_claude(prompt, f"content_{kind}", min_len=300)
         if not content:
@@ -688,6 +822,19 @@ def run(test_mode=False):
     elif hooks and not PIPELINE:
         log("ℹ️ אין גשר לגיליון. התוכן נשמר בדרייב בלבד")
 
+    # ── שער האישור ─────────────────────────────────────────────────
+    # מה שבעל העסק סימן בגיליון עובר להפקה. רק מה שסימן.
+    # ברירת המחדל היא תמיד אי-הוצאה: לא סימן = לא נוצר = לא עלה.
+    if PIPELINE and not test_mode:
+        try:
+            import gate
+            state.setdefault("weekly_cap",
+                             CONFIG.get("weekly_production_cap", gate.DEFAULT_CAP))
+            log("שער האישור — בודק מה סומן")
+            gate.run(PIPELINE, state, CONFIG.get("producer_cmd"), log)
+        except Exception as e:
+            log(f"⚠️ שער האישור נכשל, התוכן שמור: {e.__class__.__name__}")
+
     if not test_mode:
         state["last_run"] = datetime.now().isoformat()
         save_state(state)
@@ -727,6 +874,7 @@ def drive_link(path):
 
 
 def build_analysis_prompt(transcript, voice):
+    _body, _note = fit_transcript(transcript)
     return f"""אתה מנתח פגישת לקוח עבור בעל עסק, כדי ללמוד על הקהל שלו.
 
 קרא קודם: {SKILL_REFS}/privacy.md
@@ -776,18 +924,99 @@ def build_analysis_prompt(transcript, voice):
 לכל אחת, ציין באיזה ציטוט ובאיזה סיפור אפשר להשתמש
 
 ---
-התמלול:
+התמלול: {_note}
 
-{transcript[:40000]}
+{_body}
 """
 
 
-def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None, examples=""):
+def build_mirror_prompt(transcript):
+    """ניתוח מראה — מה באמת קרה בשיחה.
+
+    **זה לא פרומפט התוכן, וזה בכוונה.** פרומפט הניתוח מוציא חומר גלם
+    לכתיבה: ציטוטים, כאבים, שאלות. זה מוציא משהו אחר לגמרי — הדינמיקה,
+    מה שבר את הזרימה, ומה שהיה צריך להיאמר ולא נאמר.
+
+    הוא שווה לבעל העסק **גם אם לא יפרסם מילה**, וזה מה שהופך את
+    הסוכן ממכונת תוכן לכלי עבודה.
+    """
+    body, note = fit_transcript(transcript)
+    spec = ""
+    try:
+        spec = (SKILL_REFS / "mirror.md").read_text(encoding="utf-8")
+    except Exception:
+        return None
+    return f"""{spec}
+
+---
+התמלול: {note}
+
+{body}
+"""
+
+
+def load_format(kind, code):
+    """מחזיר את **הטקסט** של מפרט הפורמט, לא נתיב אליו.
+
+    ⚠️ **זה היה הבאג הכי יקר בסוכן הזה.** הפרומפט אמר למודל
+    "קרא את pov.md במלואו" ונתן לו נתיב. המודל לא תמיד קרא, ולכן
+    שלוש הסדרות, שלושת המטענים, חמשת העקרונות ומילת התגובה —
+    **אף פעם לא הגיעו אליו.** הוא כתב מהידע הכללי שלו עם קובץ קול
+    מוצמד, והפלט יצא גנרי בלי שאף אחד הבין למה.
+
+    מפרט שנמצא בפרומפט מגיע. מפרט שנמצא בנתיב — אולי.
+    """
+    try:
+        if kind == "POV":
+            return (SKILL_REFS / "pov.md").read_text(encoding="utf-8")
+        text = (SKILL_REFS / "formats.md").read_text(encoding="utf-8")
+    except Exception:
+        return ""
+    # החלק של הפורמט: מ-"## <קוד> —" עד ה-## הבא
+    m = re.search(rf"^## {re.escape(code)} —.*?(?=^## |\Z)", text,
+                  re.M | re.S)
+    if m:
+        return m.group(0).strip()
+    return ""
+
+
+def build_content_prompt(kind, code, analysis, voice, questions="", layer=None, examples="", mirror=""):
+    spec = load_format(kind, code)
     format_ref = (
-        f"{SKILL_REFS}/pov.md — הפורמט הזה הוא POV. קרא את הקובץ במלואו,\n"
-        "   יש לו חוקי קול משלו ונקודת כשל שקל ליפול בה"
-        if kind == "POV"
-        else f"{SKILL_REFS}/formats.md — מצא את הפרומפט {code} והפעל אותו בדיוק"
+        "\n" + "=" * 60 + "\n"
+        f"📐 המפרט של {code} — **זה מה שאתה כותב לפיו. לא ידע כללי.**\n\n"
+        f"{spec}\n"
+        + "=" * 60 + "\n"
+        if spec else
+        f"⚠️ מפרט הפורמט {code} לא נטען. אל תמציא מבנה — "
+        "כתוב פשוט ונקי, וציין בסוף שהמפרט חסר."
+    )
+    mirror_block = (
+        "\n" + "=" * 60 + "\n"
+        "🪞 ניתוח השיחה — מה באמת קרה שם:\n\n"
+        f"{mirror}\n"
+        + "=" * 60 + "\n\n"
+        "**מכאן מגיע החומר הכי חזק.** בניתוח הזה יש הדינמיקה, הפחדים,\n"
+        "מה שבר את הזרימה, ומה שהיה צריך להיאמר ולא נאמר.\n"
+        "השורות האלה נוגעות יותר מכל תיאור של בעיה.\n"
+        if mirror.strip() else ""
+    )
+    questions_block = (
+        "=" * 60 + "\n"
+        "⭐ השאלות שלקוחות שואלים אותו שוב ושוב:\n\n"
+        f"{questions}\n"
+        + "=" * 60 + "\n\n"
+        "⚠️⚠️ **זו נקודת הפתיחה של הפיסה הזו:**\n\n"
+        "**ההוק הוא שאלה חוזרת — בניסוח של הלקוח, לא בניסוח שלך.**\n"
+        "שאלה שנשאלה חמש פעמים כבר הוכיחה שהיא מטרידה אנשים אמיתיים.\n"
+        "היא לא צריכה שיפור, היא צריכה שיישמעו אותה.\n\n"
+        "**הגוף הוא התשובה של בעל העסק מהניתוח.** מה שהוא ענה בפועל,\n"
+        "בפגישה, במילים שלו. לא הסבר כללי על הנושא.\n\n"
+        "בחר את השאלה שהכי מתאימה לניתוח שלפניך. אם אף שאלה לא מתחברת\n"
+        "לחומר של הפגישה הזו — עדיף לצאת מהחומר, ולא למתוח שאלה בכוח.\n"
+        if questions.strip() else
+        "**עדיין אין מספיק פגישות כדי לדעת מה חוזר.**\n"
+        "צא מ-`## המסרים שלי` שבקובץ הקול — מה שהוא הכי רוצה שיבינו.\n"
     )
     examples_block = (
         "\n" + "=" * 60 + "\n"
@@ -833,12 +1062,13 @@ def build_content_prompt(kind, code, analysis, voice, learned_dir, layer=None, e
 {voice}
 {examples_block}{layer_line}
 
-מה שנלמד על הקהל עד היום: {learned_dir}
+{questions_block}
 
 ---
 הניתוח של הפגישה:
 
 {analysis}
+{mirror_block}
 
 ---
 

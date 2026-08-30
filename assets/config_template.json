@@ -11,6 +11,10 @@
   "voice_file": "<~/.claude/skills/<שם-סקיל-הקול>/SKILL.md — הסקיל שנבנה ב-my-voice, לא הטיוטה>",
   "email": "<כתובת המייל של בעל העסק>",
 
+  "_ההפקה": "מה שסומן בגיליון עובר ליוצר. בלי producer_cmd — לא מופק כלום, וזה תקין",
+  "producer_cmd": [],
+  "weekly_production_cap": 3,
+
   "_הגיליון": "אופציונלי. בלעדיו הסוכן עובד בדיוק אותו דבר, רק בלי טבלה",
   "sheet_url": "<הקישור לגיליון, לפתיחה מהמייל>",
   "pipeline_url": "<כתובת ה-Web app מ-Apps Script. מתחילה ב-https://script.google.com/>",
